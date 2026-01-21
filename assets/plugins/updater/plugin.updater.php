@@ -339,6 +339,7 @@ function mmkDir($folder, $perm = 0777)
 $version = "' . $version . '";
 
 downloadFile("https://github.com/" . $version . "/archive/" . $_GET["version"] . ".zip", "evo.zip");
+set_time_limit(30);
 $zip = new ZipArchive;
 $res = $zip->open(__DIR__ . "/evo.zip");
 $zip->extractTo(__DIR__ . "/temp");
@@ -373,6 +374,7 @@ if (is_file(__DIR__ . "/assets/cache/siteManager.php")) {
         removeFolder(__DIR__ . "/temp/" . $dir . "/manager");
     }
 }
+set_time_limit(30);
 copyFolder(__DIR__ . "/temp/" . $dir, __DIR__ . "/");
 removeFolder(__DIR__ . "/temp");
 unlink(__DIR__ . "/evo.zip");
