@@ -2,20 +2,12 @@
 
 class EvoSessionProxy
 {
-    /**
-     * @var bool
-     */
-    private static $initialized = false;
+    private static bool $initialized = false;
+    private static bool $synced = false;
+    private static bool $shutdownRegistered = false;
 
-    /**
-     * @var bool
-     */
-    private static $synced = false;
-
-    /**
-     * @var bool
-     */
-    private static $shutdownRegistered = false;
+    private static ?object $laravelStore = null;
+    private static bool $storeResolved = false;
 
     /**
      * Early init - before Laravel middleware.
@@ -34,7 +26,11 @@ class EvoSessionProxy
     }
 
     /**
-     * Init - after Laravel StartSession middleware.
+     * One-time initialization of the session proxy.
+     * - Starts native PHP session, using Laravel cookie ID if available
+     * - Loads Laravel session (ensuring it is started, syncing ID if needed)
+     * - Migrates legacy EVOSESSID if needed
+     * - Merges data: Laravel wins on conflicts
      */
     public static function init(): void
     {
@@ -42,31 +38,26 @@ class EvoSessionProxy
             return;
         }
 
+        $cookieName = self::getLaravelSessionCookieName();
+        $cookieId = self::getCookieValue($cookieName);
+        if (is_string($cookieId) && $cookieId !== '') {
+            session_id($cookieId);
+        }
+
+        @session_start();
+
+        // Capture any early data
+        $earlyData = is_array($_SESSION) ? $_SESSION : [];
+        $_SESSION = $earlyData;
+
         $store = self::getLaravelSessionStore();
         if ($store === null) {
+            self::$initialized = true;
             return;
         }
 
         self::ensureLaravelSessionStarted($store);
         self::migrateLegacySessionIfNeeded($store);
-
-        // Start PHP session with cookies disabled (Laravel owns the cookie).
-        if (session_status() === PHP_SESSION_NONE) {
-            ini_set('session.use_cookies', '0');
-            if (!defined('PHP_VERSION_ID') || PHP_VERSION_ID < 80400) {
-                ini_set('session.use_only_cookies', '0');
-            }
-            $sessionId = $store->getId();
-            if (is_string($sessionId) && $sessionId !== '') {
-                session_id($sessionId);
-            }
-            @session_start();
-        }
-
-        $earlyData = (isset($_SESSION) && is_array($_SESSION)) ? $_SESSION : [];
-        if (!isset($_SESSION) || !is_array($_SESSION)) {
-            $_SESSION = [];
-        }
 
         // Laravel → $_SESSION (Laravel wins on conflicts).
         $laravelData = $store->all();
@@ -106,23 +97,37 @@ class EvoSessionProxy
             return;
         }
 
+        self::ensureLaravelSessionStarted($store);
+
         $laravelData = $store->all();
 
+        // Filter out internal keys
+        $sessionFiltered = [];
         foreach ($_SESSION as $key => $value) {
             if (self::isInternalKey($key)) {
                 continue;
             }
-            if (!array_key_exists($key, $laravelData) || $laravelData[$key] !== $value) {
-                $store->put($key, $value);
-            }
+            $sessionFiltered[$key] = $value;
         }
 
+        $laravelFiltered = [];
         foreach ($laravelData as $key => $value) {
             if (self::isInternalKey($key)) {
                 continue;
             }
-            if (!array_key_exists($key, $_SESSION)) {
-                $store->forget($key);
+            $laravelFiltered[$key] = $value;
+        }
+
+        // Forget keys in Laravel but not in $_SESSION
+        $toForget = array_diff_key($laravelFiltered, $sessionFiltered);
+        foreach ($toForget as $key => $value) {
+            $store->forget($key);
+        }
+
+        // Put/update keys from $_SESSION that are new or changed
+        foreach ($sessionFiltered as $key => $value) {
+            if (!array_key_exists($key, $laravelFiltered) || $laravelFiltered[$key] !== $value) {
+                $store->put($key, $value);
             }
         }
 
@@ -130,35 +135,43 @@ class EvoSessionProxy
     }
 
     /**
+     * Cached resolver for Laravel session store (once per request).
      * @return object|null
      */
-    private static function getLaravelSessionStore()
+    private static function getLaravelSessionStore(): ?object
     {
+        if (self::$storeResolved) {
+            return self::$laravelStore;
+        }
+
+        self::$storeResolved = true;
+
         if (!function_exists('app')) {
+            self::$laravelStore = null;
             return null;
         }
 
         $app = app();
         if (!is_object($app) || !method_exists($app, 'has') || !$app->has('session')) {
+            self::$laravelStore = null;
             return null;
         }
 
         try {
             $manager = app('session');
         } catch (\Throwable $exception) {
+            self::$laravelStore = null;
             return null;
         }
 
-        if (is_object($manager) && method_exists($manager, 'driver')) {
-            $store = $manager->driver();
-        } else {
-            $store = $manager;
-        }
+        $store = method_exists($manager, 'driver') ? $manager->driver() : $manager;
 
         if (!is_object($store) || !method_exists($store, 'all') || !method_exists($store, 'getId')) {
+            self::$laravelStore = null;
             return null;
         }
 
+        self::$laravelStore = $store;
         return $store;
     }
 
@@ -174,10 +187,11 @@ class EvoSessionProxy
 
         $cookieName = self::getLaravelSessionCookieName();
         $cookieId = self::getCookieValue($cookieName);
-        if (is_string($cookieId) && $cookieId !== '') {
-            if (method_exists($store, 'setId')) {
-                $store->setId($cookieId);
-            }
+        if (!is_string($cookieId) || $cookieId === '') {
+            $cookieId = session_id();
+        }
+        if ($cookieId && method_exists($store, 'setId')) {
+            $store->setId($cookieId);
         }
 
         if (method_exists($store, 'start')) {
