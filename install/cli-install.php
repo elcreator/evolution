@@ -168,6 +168,7 @@ class InstallEvo
         $installMigrationsPath = EVO_BASE_PATH . 'install/stubs/migrations';
         bootstrapInstallMigrationHistory($installMigrationsPath);
         Console::call('migrate', ['--path' => $installMigrationsPath, '--realpath' => true, '--force' => true]);
+        Console::call('migrate', ['--force' => true]);
         seed('update');
         echo 'Evolution CMS updated!' . "\n";
         $this->checkRemoveInstall();
