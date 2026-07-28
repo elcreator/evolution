@@ -3203,36 +3203,21 @@ class Core extends AbstractLaravel implements Interfaces\CoreInterface
                 $this->_sendRedirectForRefPage($this->documentObject['content']);
             }
 
-            $template = TemplateProcessor::getBladeDocumentContent();
-
-            if ($template) {
-                $this->documentObject['cacheable'] = 0;
-                /** @var \Illuminate\View\View $tpl */
-
-                if (isset($this->documentObject['id'])) {
-                    $data = [
-                        'modx' => $this,
-                        'documentObject' => $this->makeDocumentObject($this->documentObject['id'])
-                    ];
-                } else {
-                    $data = [
-                        'modx' => $this,
-                        'documentObject' => [],
-                        'siteContentObject' => []
-                    ];
+            // Delegate file-based template rendering to the parser selected in
+            // the `chunk_processor` setting. When that parser does not render
+            // from files (e.g. the legacy DocumentParser), no template files
+            // are probed on disk.
+            $template = false;
+            $renderer = $this->getDocumentTemplateRenderer();
+            if ($renderer !== null) {
+                $rendered = $renderer->renderDocumentTemplate($this);
+                if ($rendered !== null) {
+                    $template = true;
+                    $templateCode = $rendered;
                 }
+            }
 
-                $viewData = $this->getDataForView();
-
-                $this['view']->share(array_merge($data, $viewData));
-
-                if ($this->isChunkProcessor('DLTemplate')) {
-                    app('DLTemplate')->blade->share(array_merge($data, $viewData));
-                }
-
-                $tpl = $this['view']->make($template, $viewData);
-                $templateCode = $tpl->render();
-            } else {
+            if (!$template) {
                 // get the template and start parsing!
                 if (!$this->documentObject['template']) {
                     $templateCode = '[*content*]';
@@ -4684,6 +4669,34 @@ class Core extends AbstractLaravel implements Interfaces\CoreInterface
             $processor = get_class($processor);
         }
         return is_scalar($processor) && mb_strtolower($value) === mb_strtolower($processor) && class_exists($processor, false);
+    }
+
+    /**
+     * Resolve the document template renderer for the parser selected in the
+     * `chunk_processor` setting.
+     *
+     * Returns null when the selected parser does not provide file-based
+     * template rendering (e.g. the legacy DocumentParser, or a parser that
+     * does not implement DocumentTemplateRendererInterface). In that case the
+     * request falls back to the database template and no template files are
+     * probed on disk.
+     *
+     * @return Interfaces\DocumentTemplateRendererInterface|null
+     */
+    protected function getDocumentTemplateRenderer(): ?Interfaces\DocumentTemplateRendererInterface
+    {
+        $processor = trim((string) $this->getConfig('chunk_processor'));
+        if ($processor === '') {
+            return null;
+        }
+
+        try {
+            $renderer = $this->make($processor);
+        } catch (\Throwable $e) {
+            return null;
+        }
+
+        return $renderer instanceof Interfaces\DocumentTemplateRendererInterface ? $renderer : null;
     }
 
     /**
@@ -6305,7 +6318,7 @@ class Core extends AbstractLaravel implements Interfaces\CoreInterface
         $search_path = ['assets/tvs/', 'assets/chunks/', 'assets/templates/', $this->getConfig('rb_base_url') . 'files/', ''];
         foreach ($search_path as $path) {
             $file_path = EVO_BASE_PATH . $path . $str;
-            if (strpos($file_path, EVO_MANAGER_PATH) === 0) {
+            if (str_starts_with($file_path, EVO_MANAGER_PATH)) {
                 return $errorMsg;
             }
 

@@ -1,12 +1,14 @@
 <?php namespace EvolutionCMS;
 
+use EvolutionCMS\Interfaces\CoreInterface;
+use EvolutionCMS\Interfaces\DocumentTemplateRendererInterface;
 use EvolutionCMS\Legacy\Phx;
 use Illuminate\Filesystem\Filesystem;
 use Illuminate\View\FileViewFinder;
 
 /**
  */
-class Parser
+class Parser implements DocumentTemplateRendererInterface
 {
     public const TV_BINDINGS = [
         'FILE',
@@ -475,6 +477,47 @@ class Parser
         } catch (\Exception $exception) {
             $this->modx->messageQuit($exception->getMessage());
         }
+    }
+
+    /**
+     * Render the current document from a Blade template file, if one exists.
+     *
+     * {@inheritDoc}
+     */
+    public function renderDocumentTemplate (CoreInterface $core): ?string
+    {
+        $template = app('TemplateProcessor')->getBladeDocumentContent();
+        if (!$template) {
+            return null;
+        }
+
+        $core->documentObject['cacheable'] = 0;
+
+        $data = [
+            'evo'           => $core,
+            'modx'           => $core,
+        ];
+        if (isset($core->documentObject['id'])) {
+            $data += [
+                'documentObject' => $core->makeDocumentObject($core->documentObject['id']),
+            ];
+        } else {
+            $data += [
+                'documentObject'    => [],
+                'siteContentObject' => [],
+            ];
+        }
+
+        $viewData = $core->getDataForView();
+        $shared = array_merge($data, $viewData);
+
+        $core['view']->share($shared);
+        $this->blade->share($shared);
+
+        /** @var \Illuminate\View\View $tpl */
+        $tpl = $core['view']->make($template, $viewData);
+
+        return $tpl->render();
     }
 
     /**
