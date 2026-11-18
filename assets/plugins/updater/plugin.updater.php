@@ -1002,12 +1002,244 @@ if (!function_exists('updaterRefreshPermissionsAfterBuildChange')) {
     }
 }
 
+if (!function_exists('updaterResolveLatest')) {
+    /**
+     * The newest version or branch head the site may move to, as the widget offers it.
+     *
+     * Releases are looked up once a day (assets/cache/updater/check_DD.json), a branch head once an
+     * hour (updaterFetchRefHead()); updaterForceFreshCheck() drops both caches first.
+     *
+     * @param array $currentVersion factory/version.php
+     * @param string $version Repository slug of the plugin settings.
+     * @param string $type tags or releases; branch for a configured branch.
+     * @param string $branch Branch of the plugin settings.
+     * @param string $stableOnly 'true' to offer stable releases only.
+     * @return array|null Null when GitHub did not answer with a release list.
+     */
+    function updaterResolveLatest(array $currentVersion, $version, $type, $branch, $stableOnly)
+    {
+        $arrayVersion = explode('.', (string)($currentVersion['version'] ?? ''));
+        $currentMajorVersion = array_shift($arrayVersion);
+        $isBranchMode = $type === 'branch';
+        $git = [];
+
+        // make:site notes in factory/version.php the branch, moving tag or fork a site
+        // was updated from. Such a site follows that line, not the releases: it is
+        // offered its branch again once the branch has moved past the noted commit,
+        // and always from the repository it came from.
+        $installedRef = trim((string)($currentVersion['ref'] ?? ''));
+        $installedRepository = trim((string)($currentVersion['repository'] ?? ''));
+        $installedCommit = trim((string)($currentVersion['commit'] ?? ''));
+        if (preg_match('~^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$~', $installedRepository)) {
+            $version = $installedRepository;
+        }
+        $isLineMode = !$isBranchMode
+            && $installedRef !== ''
+            && !preg_match('/^[0-9a-f]{7,40}$/i', $installedRef)
+            && !preg_match('/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/', $installedRef);
+        if ($isLineMode) {
+            $isBranchMode = true;
+            $branch = $installedRef;
+        }
+
+        if ($isBranchMode) {
+            $git = [
+                'version' => $branch,
+                'published_at' => '',
+                'branch_ref' => true,
+                'head' => '',
+            ];
+            if ($isLineMode) {
+                $head = updaterFetchRefHead($version, $branch);
+                $git['head'] = $head['sha'];
+                $git['published_at'] = $head['date'];
+            }
+        } else {
+            $cacheFile = EVO_BASE_PATH . 'assets/cache/updater/check_' . date("d") . '.json';
+
+            if (!file_exists($cacheFile)) {
+                $url = 'https://api.github.com/repos/' . $version . '/' . $type;
+                $info = (new \EvolutionCMS\Services\Store\RemoteTransportService())->fetchBody($url);
+                if (substr($info, 0, 1) != '[') {
+                    return null;
+                }
+                $info = json_decode($info, true);
+
+                foreach ($info as $key => $val) {
+                    $candidateVersion = '';
+                    if (isset($val['name']) && $val['name'] !== '') {
+                        $candidateVersion = $val['name'];
+                    } elseif (isset($val['tag_name']) && $val['tag_name'] !== '') {
+                        $candidateVersion = $val['tag_name'];
+                    }
+
+                    if ($candidateVersion === '') {
+                        continue;
+                    }
+
+                    $arrayVersion = explode('.', $candidateVersion);
+                    if ($currentMajorVersion == array_shift($arrayVersion)) {
+
+                        $git['version'] = $candidateVersion;
+                        if (isset($val['published_at']) && $val['published_at'] !== '') {
+                            $git['published_at'] = $val['published_at'];
+                        }
+
+                        if (strpos($candidateVersion, 'alpha')) {
+                            $git['alpha'] = $candidateVersion;
+                            continue;
+                        } elseif (strpos($candidateVersion, 'beta')) {
+                            $git['beta'] = $candidateVersion;
+                            continue;
+                        } else {
+                            $git['stable'] = $candidateVersion;
+                            break;
+                        }
+                    }
+                }
+
+                file_put_contents($cacheFile, json_encode($git));
+            } else {
+                $git = file_get_contents($cacheFile);
+                $git = json_decode($git, true);
+            }
+
+            if ($stableOnly == 'true') {
+                if (isset($git['stable'])) {
+                    if (version_compare($git['version'], $git['stable'], '!=')) {
+                        $git['version'] = $git['stable'];
+                    }
+                }
+            }
+            if (isset($git['version']) && (!isset($git['published_at']) || $git['published_at'] === '')) {
+                $fallbackPublishedAt = updaterFetchReleasePublishedAt($version, $git['version']);
+                if ($fallbackPublishedAt !== '') {
+                    $git['published_at'] = $fallbackPublishedAt;
+                    file_put_contents($cacheFile, json_encode($git));
+                }
+            }
+        }
+
+        $found = isset($git['version']);
+        if (!$found) {
+            $git['version'] = $currentVersion['version'];
+        }
+        $shouldShowUpdate = $isBranchMode
+            ? $git['version'] != '' && (!$isLineMode || ($git['head'] !== '' && $git['head'] !== $installedCommit))
+            : (version_compare($git['version'], $currentVersion['version'], '>') && $git['version'] != '');
+
+        return [
+            'git' => $git,
+            'found' => $found,
+            'repository' => $version,
+            'branch' => $branch,
+            'branch_mode' => $isBranchMode,
+            'line_mode' => $isLineMode,
+            'installed_commit' => $installedCommit,
+            // a line whose head could not be read is not known to be current
+            'head_known' => !$isLineMode || $git['head'] !== '',
+            'update' => $shouldShowUpdate,
+        ];
+    }
+}
+
+if (!function_exists('updaterForceFreshCheck')) {
+    /**
+     * Drop the cached release list and branch heads, so the next lookup asks GitHub.
+     *
+     * At most once per $minInterval seconds: GitHub allows a site 60 unauthenticated API calls
+     * an hour, and a click that repeats within the interval reads what the previous one fetched.
+     *
+     * @param int $minInterval Seconds since the last forced check below which nothing is dropped.
+     * @param string|null $dir Cache folder, assets/cache/updater/ by default.
+     * @return bool Whether the caches were dropped.
+     */
+    function updaterForceFreshCheck($minInterval = 30, $dir = null)
+    {
+        $dir = rtrim($dir ?? EVO_BASE_PATH . 'assets/cache/updater', '/\\') . '/';
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0775, true);
+        }
+        $stamp = $dir . 'forced_check.json';
+        if (is_file($stamp) && filemtime($stamp) > time() - (int)$minInterval) {
+            return false;
+        }
+
+        foreach (array_merge(glob($dir . 'check_*.json') ?: [], glob($dir . 'head_*.json') ?: []) as $file) {
+            @unlink($file);
+        }
+        @file_put_contents($stamp, json_encode(['at' => time()]));
+        clearstatcache();
+
+        return true;
+    }
+}
+
+if (!function_exists('updaterHandleVersionCheck')) {
+    /**
+     * Answer the header's "check for a new version" click with JSON and stop.
+     *
+     * @param bool $visible Whether the plugin settings show the update widget to this manager.
+     */
+    function updaterHandleVersionCheck(array $_lang, $visible, array $currentVersion, $version, $type, $branch, $stableOnly)
+    {
+        if (!$visible) {
+            updaterJsonResponse(['ok' => false, 'message' => updaterLang($_lang, 'updater_check_failed', 'Could not check for a new version. Try again later.')]);
+        }
+
+        if ($type === 'commits') {
+            updaterJsonResponse(['ok' => true, 'update' => null, 'message' => updaterLang($_lang, 'updater_check_commits', 'This site follows the commit feed: the dashboard lists the latest commits.')]);
+        }
+
+        updaterForceFreshCheck();
+        $latest = updaterResolveLatest($currentVersion, $version, $type, $branch, $stableOnly);
+        if ($latest === null || !$latest['head_known']) {
+            updaterJsonResponse(['ok' => false, 'message' => updaterLang($_lang, 'updater_check_failed', 'Could not check for a new version. Try again later.')]);
+        }
+
+        $target = (string)$latest['git']['version'];
+        if ($latest['line_mode'] && $latest['git']['head'] !== '') {
+            $target .= ' @' . substr($latest['git']['head'], 0, 7);
+        }
+
+        updaterJsonResponse([
+            'ok' => true,
+            'update' => (bool)$latest['update'],
+            'latest' => $target,
+            'message' => $latest['update']
+                ? sprintf(updaterLang($_lang, 'updater_check_available', 'New version available: %s'), $target)
+                : updaterLang($_lang, 'updater_check_current', 'This is the latest version.'),
+        ]);
+    }
+}
+
 if (isset($modx->Event->name) && $modx->Event->name === 'OnManagerWelcomeHome') {
     updaterRefreshPermissionsAfterBuildChange((array)$modx->getVersionData());
 }
 
 if (isset($_REQUEST['updater_system_task'])) {
     updaterHandleSystemTaskRequest();
+}
+
+if (isset($_POST['updater_check']) && isset($modx->Event->name) && $modx->Event->name === 'OnManagerPageInit') {
+    $_lang = [];
+    include EVO_BASE_PATH . 'assets/plugins/updater/lang/en.php';
+    $language = $modx->config['manager_language'];
+    if (\EvolutionCMS\Support\ManagerLanguage::isName($language) && file_exists(EVO_BASE_PATH . 'assets/plugins/updater/lang/' . $language . '.php')) {
+        include EVO_BASE_PATH . 'assets/plugins/updater/lang/' . $language . '.php';
+    }
+    updaterHandleVersionCheck(
+        $_lang,
+        !(($role != 1 && $wdgVisibility == 'AdminOnly')
+            || ($role == 1 && $wdgVisibility == 'AdminExcluded')
+            || ($role != $ThisRole && $wdgVisibility == 'ThisRoleOnly')
+            || ($user != $ThisUser && $wdgVisibility == 'ThisUserOnly')),
+        (array)$modx->getVersionData(),
+        $version,
+        $type,
+        $branch,
+        isset($stableOnly) ? (string)$stableOnly : 'true'
+    );
 }
 
 if ($role != 1 && $wdgVisibility == 'AdminOnly') {
@@ -1139,116 +1371,21 @@ if ($role != 1 && $wdgVisibility == 'AdminOnly') {
             $output = '';
 
             $currentVersion = $modx->getVersionData();
-            $arrayVersion = explode('.', $currentVersion['version']);
-            $currentMajorVersion = array_shift($arrayVersion);
-            $isBranchMode = $type === 'branch';
-            $git = [];
-
-            // make:site notes in factory/version.php the branch, moving tag or fork a site
-            // was updated from. Such a site follows that line, not the releases: it is
-            // offered its branch again once the branch has moved past the noted commit,
-            // and always from the repository it came from.
-            $installedRef = trim((string)($currentVersion['ref'] ?? ''));
-            $installedRepository = trim((string)($currentVersion['repository'] ?? ''));
-            $installedCommit = trim((string)($currentVersion['commit'] ?? ''));
-            if (preg_match('~^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$~', $installedRepository)) {
-                $version = $installedRepository;
+            $latest = updaterResolveLatest($currentVersion, $version, $type, $branch, isset($stableOnly) ? (string)$stableOnly : 'true');
+            if ($latest === null) {
+                return;
             }
-            $isLineMode = !$isBranchMode
-                && $installedRef !== ''
-                && !preg_match('/^[0-9a-f]{7,40}$/i', $installedRef)
-                && !preg_match('/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/', $installedRef);
-            if ($isLineMode) {
-                $isBranchMode = true;
-                $branch = $installedRef;
-            }
+            $git = $latest['git'];
+            $version = $latest['repository'];
+            $branch = $latest['branch'];
+            $isBranchMode = $latest['branch_mode'];
+            $isLineMode = $latest['line_mode'];
+            $installedCommit = $latest['installed_commit'];
+            $shouldShowUpdate = $latest['update'];
 
-            if ($isBranchMode) {
-                $git = [
-                    'version' => $branch,
-                    'published_at' => '',
-                    'branch_ref' => true,
-                    'head' => '',
-                ];
-                if ($isLineMode) {
-                    $head = updaterFetchRefHead($version, $branch);
-                    $git['head'] = $head['sha'];
-                    $git['published_at'] = $head['date'];
-                }
-            } else {
-                $cacheFile = EVO_BASE_PATH . 'assets/cache/updater/check_' . date("d") . '.json';
-
-                if (!file_exists($cacheFile)) {
-                    $url = 'https://api.github.com/repos/' . $version . '/' . $type;
-                    $info = (new \EvolutionCMS\Services\Store\RemoteTransportService())->fetchBody($url);
-                    if (substr($info, 0, 1) != '[') {
-                        return;
-                    }
-                    $info = json_decode($info, true);
-
-                    foreach ($info as $key => $val) {
-                        $candidateVersion = '';
-                        if (isset($val['name']) && $val['name'] !== '') {
-                            $candidateVersion = $val['name'];
-                        } elseif (isset($val['tag_name']) && $val['tag_name'] !== '') {
-                            $candidateVersion = $val['tag_name'];
-                        }
-
-                        if ($candidateVersion === '') {
-                            continue;
-                        }
-
-                        $arrayVersion = explode('.', $candidateVersion);
-                        if ($currentMajorVersion == array_shift($arrayVersion)) {
-
-                            $git['version'] = $candidateVersion;
-                            if (isset($val['published_at']) && $val['published_at'] !== '') {
-                                $git['published_at'] = $val['published_at'];
-                            }
-
-                            if (strpos($candidateVersion, 'alpha')) {
-                                $git['alpha'] = $candidateVersion;
-                                continue;
-                            } elseif (strpos($candidateVersion, 'beta')) {
-                                $git['beta'] = $candidateVersion;
-                                continue;
-                            } else {
-                                $git['stable'] = $candidateVersion;
-                                break;
-                            }
-                        }
-                    }
-
-                    file_put_contents($cacheFile, json_encode($git));
-                } else {
-                    $git = file_get_contents($cacheFile);
-                    $git = json_decode($git, true);
-                }
-
-                if ($stableOnly == 'true') {
-                    if (isset($git['stable'])) {
-                        if (version_compare($git['version'], $git['stable'], '!=')) {
-                            $git['version'] = $git['stable'];
-                        }
-                    }
-                }
-                if (isset($git['version']) && (!isset($git['published_at']) || $git['published_at'] === '')) {
-                    $fallbackPublishedAt = updaterFetchReleasePublishedAt($version, $git['version']);
-                    if ($fallbackPublishedAt !== '') {
-                        $git['published_at'] = $fallbackPublishedAt;
-                        file_put_contents($cacheFile, json_encode($git));
-                    }
-                }
-            }
-
-            if (isset($git['version'])) {
+            if ($latest['found']) {
                 $_SESSION['updateversion'] = $git['version'];
-            } else {
-                $git['version'] = $currentVersion['version'];
             }
-            $shouldShowUpdate = $isBranchMode
-                ? $git['version'] != '' && (!$isLineMode || ($git['head'] !== '' && $git['head'] !== $installedCommit))
-                : (version_compare($git['version'], $currentVersion['version'], '>') && $git['version'] != '');
             if ($shouldShowUpdate) {
                 $currentVersionString = (string)$currentVersion['version'];
                 $latestVersionRaw = (string)$git['version'];

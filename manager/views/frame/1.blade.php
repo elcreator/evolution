@@ -222,6 +222,7 @@ $managerTitle = evo()->getConfig('site_name') . ' - (Evolution CMS Manager)';
     <script src="media/script/tree-drop-guard-helper.js?v={{evo()->getVersionData('version')}}"></script>
     <script src="media/script/tree-parent-guard-helper.js?v={{evo()->getVersionData('version')}}"></script>
     <script src="media/script/main-target-link-helper.js?v={{evo()->getVersionData('version')}}"></script>
+    <script src="@revision(MGR_DIR . '/media/script/version-check-helper.js')"></script>
     <script src="@revision(MGR_DIR . '/media/script/manager-tab-state.js')"></script>
     <script src="@revision(MGR_DIR . '/' . ManagerTheme::getThemeDir(false) . 'js/evo.js')"></script>
     @if ($modx->getConfig('show_picker'))
@@ -408,7 +409,12 @@ $managerTitle = evo()->getConfig('site_name') . ' - (Evolution CMS Manager)';
                                     @endif
                                     @php
                                         $style = evo()->getConfig('settings_version') !== evo()->getVersionData('version') ? 'style="color:#ffff8a;"' : '';
-                                        echo '<li><span class="dropdown-item" title="' . evo()->getPhpCompat()->entities(evo()->getConfig('site_name')) . ' &ndash; ' . evo()->getVersionData('full_appname') . '" ' . $style . '>' . evo()->getVersionData('branch') . ' ' . evo()->getConfig('settings_version') . '</span></li>';
+                                        // the Updater plugin answers a click with a fresh check (version-check-helper.js)
+                                        $versionCheck = in_array('Updater', evo()->pluginEvent['OnManagerPageInit'] ?? [], true);
+                                        $versionTag = $versionCheck ? 'a href="javascript:;" data-version-check' : 'span';
+                                        echo '<li><' . $versionTag . ' class="dropdown-item" title="' . evo()->getPhpCompat()->entities(evo()->getConfig('site_name')) . ' &ndash; ' . evo()->getVersionData('full_appname') . '" ' . $style . '>' . evo()->getVersionData('branch') . ' ' . evo()->getConfig('settings_version')
+                                            // dropdown-item-*: evo.hideDropDown() keeps the menu open, so the answer stays readable
+                                            . ($versionCheck ? '<span class="dropdown-item-result" data-role="result"></span></a>' : '</span>') . '</li>';
                                     @endphp
                                 </ul>
                             </li>
