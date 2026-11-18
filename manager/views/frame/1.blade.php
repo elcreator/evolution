@@ -222,6 +222,7 @@ $managerTitle = evo()->getConfig('site_name') . ' - (Evolution CMS Manager)';
     <script src="media/script/tree-drop-guard-helper.js?v={{evo()->getVersionData('version')}}"></script>
     <script src="media/script/tree-parent-guard-helper.js?v={{evo()->getVersionData('version')}}"></script>
     <script src="media/script/main-target-link-helper.js?v={{evo()->getVersionData('version')}}"></script>
+    <script src="@revision(MGR_DIR . '/media/script/version-check-helper.js')"></script>
     <script src="@revision(MGR_DIR . '/media/script/manager-tab-state.js')"></script>
     <script src="@revision(MGR_DIR . '/' . ManagerTheme::getThemeDir(false) . 'js/evo.js')"></script>
     @includeWhen($showLegacyPicker, 'manager::frame.color-picker-scripts')

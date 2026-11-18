@@ -167,7 +167,12 @@
                                     @endif
                                     @php
                                         $style = evo()->getConfig('settings_version') !== evo()->getVersionData('version') ? 'style="color:#ffff8a;"' : '';
-                                        echo '<li><span class="dropdown-item" title="' . evo()->getPhpCompat()->entities(evo()->getConfig('site_name')) . ' &ndash; ' . evo()->getVersionData('full_appname') . '" ' . $style . '>' . evo()->getVersionData('branch') . ' ' . evo()->getConfig('settings_version') . '</span></li>';
+                                        // the Updater plugin answers a click with a fresh check (version-check-helper.js)
+                                        $versionCheck = in_array('Updater', evo()->pluginEvent['OnManagerPageInit'] ?? [], true);
+                                        $versionTag = $versionCheck ? 'a href="javascript:;" data-version-check' : 'span';
+                                        echo '<li><' . $versionTag . ' class="dropdown-item" title="' . evo()->getPhpCompat()->entities(evo()->getConfig('site_name')) . ' &ndash; ' . evo()->getVersionData('full_appname') . '" ' . $style . '>' . evo()->getVersionData('branch') . ' ' . evo()->getConfig('settings_version')
+                                            // dropdown-item-*: evo.hideDropDown() keeps the menu open, so the answer stays readable
+                                            . ($versionCheck ? '<span class="dropdown-item-result" data-role="result"></span></a>' : '</span>') . '</li>';
                                     @endphp
                                 </ul>
                             </li>
