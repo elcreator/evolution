@@ -161,7 +161,10 @@ commit, from the zip comment GitHub writes) in `core/factory/version.php`; the m
 an update without a version follows that note, and never moves a site back to an older release on
 its own. Keep it there: every way of replacing the code also replaces that file, so an overlay of a
 release clears the note. Do not rely on `install/` for anything a switch needs: it is deleted after
-installation, and a site moved by git, Composer or an older updater never runs it. Compiled Blade
+installation, and a site moved by git, Composer or an older updater never runs it. The one exception is
+`install/stubs/seeds/update/00_finish_with_new_code.php`: `make:site` of 3.5.7 - 3.5.9 loads that folder of
+its archive in the old process, and this file, which must stay first there, hands the rest of the update to
+`make:site finish` before any query runs. Compiled Blade
 views are keyed on the template file time (`EvolutionCMS\Extensions\BladeCompiler`) for that reason,
 and packages of `core/custom/composer.json` are restored by `make:site`, the CLI updater and the web
 installer (`restoreCustomComposerPackages()`) through `EvolutionCMS\Services\CustomComposerPackages`,
@@ -180,7 +183,8 @@ under one policy. Do not add a restore path that skips it:
   the merged requirements must still fit the lock). Any change beyond installing those versions needs
   consent (`make:site --update-custom-packages`, `cli-install.php --updateCustomPackages=y`). `make:site`
   runs it against the unpacked archive before `moveFiles()` (`preflightComposer()`), so a refusal changes
-  nothing. The staged `custom/composer.json` is rebased (`rebasedCustomComposerJson()`: the merge plugin
+  nothing. An archive without `core/vendor` is checked with `COMPOSER_VENDOR_DIR` on the site's vendor: without the
+  merge plugin the dry run never reads `custom/composer.json` and agrees to anything. The staged `custom/composer.json` is rebased (`rebasedCustomComposerJson()`: the merge plugin
   prefixes `custom/` to path repositories and to `extra.merge-plugin.include` / `require`, a list or a
   single path) and removed again before `moveFiles()`, which
   would otherwise lay it over the site's own.
